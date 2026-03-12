@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from app.api import vision
+from app.api import vision, advanced_ai
 from app.core.config import settings
 from app.utils.logger import logger
 
@@ -42,6 +42,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(vision.router, prefix="/api/v1/vision", tags=["vision"])
+app.include_router(advanced_ai.router, prefix="/api/v1/ai", tags=["advanced-ai"])
 
 
 @app.get("/")
