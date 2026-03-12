@@ -8,6 +8,13 @@ from app.core.fusion.multimodal_fusion import (
     CrossModalAttention,
     MultimodalClassifier,
 )
+from app.core.fusion.event_detection import (
+    EventDetector,
+    EventActionRecommender,
+    DetectedEvent,
+    EventType,
+    EventSignature,
+)
 
 __all__ = [
     "ModalityFeatures",
@@ -16,4 +23,9 @@ __all__ = [
     "AttentionFusion",
     "CrossModalAttention",
     "MultimodalClassifier",
+    "EventDetector",
+    "EventActionRecommender",
+    "DetectedEvent",
+    "EventType",
+    "EventSignature",
 ]

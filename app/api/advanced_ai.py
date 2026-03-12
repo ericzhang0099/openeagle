@@ -16,6 +16,10 @@ from app.core.fusion import (
     LateFusion,
     AttentionFusion,
     MultimodalClassifier,
+    EventDetector,
+    EventActionRecommender,
+    DetectedEvent,
+    EventType,
 )
 from app.core.causal import (
     CausalGraph,
@@ -24,6 +28,7 @@ from app.core.causal import (
     CounterfactualEngine,
     InterventionOptimizer,
 )
+from app.core.inference_engine import InferenceEngine, StudentProfile
 
 router = APIRouter(prefix="/api/v1/ai", tags=["advanced-ai"])
 
@@ -135,11 +140,59 @@ class OptimizationResponse(BaseModel):
 
 
 # ============================================================================
+# Event Detection & Inference Engine Models
+# ============================================================================
+
+class EventDetectionRequest(BaseModel):
+    """Request for event detection."""
+    vision_features: List[List[float]]
+    audio_features: Optional[List[List[float]]] = None
+    temporal_features: List[List[float]]
+
+
+class EventDetectionResponse(BaseModel):
+    """Response with detected events."""
+    events: List[Dict]
+    total_events: int
+    highest_confidence_event: Optional[str]
+
+
+class InferenceRequest(BaseModel):
+    """Request for complete inference."""
+    student_id: str
+    vision_features: List[List[float]]
+    audio_features: Optional[List[List[float]]] = None
+    temporal_features: List[List[float]]
+    context: Optional[Dict] = None
+
+
+class InferenceResponse(BaseModel):
+    """Complete inference response."""
+    current_state: str
+    state_confidence: float
+    events: List[Dict]
+    causal_insights: List[Dict]
+    immediate_actions: List[Dict]
+    long_term_suggestions: List[Dict]
+    what_if_scenarios: List[Dict]
+
+
+class StudentProfileRequest(BaseModel):
+    """Request to register student profile."""
+    student_id: str
+    grade_level: str = "primary_3"
+    learning_style: str = "visual"
+    average_focus_duration: float = 15.0
+    subject_proficiency: Optional[Dict[str, float]] = None
+
+
+# ============================================================================
 # Dependency Injection
 # ============================================================================
 
 _fusion_models = {}
 _classifier_models = {}
+_inference_engine: Optional[InferenceEngine] = None
 
 def get_fusion_model(fusion_type: str = "attention"):
     """Get or create fusion model."""
@@ -164,12 +217,20 @@ def get_classifier_model():
     if "student_state" not in _classifier_models:
         _classifier_models["student_state"] = MultimodalClassifier(
             fusion_type="attention",
-            num_classes=5,  # focused, distracted, tired, excited, confused
+            num_classes=5,
             hidden_dim=256,
             num_heads=8,
             num_layers=2
         )
     return _classifier_models["student_state"]
+
+
+def get_inference_engine() -> InferenceEngine:
+    """Get or create inference engine."""
+    global _inference_engine
+    if _inference_engine is None:
+        _inference_engine = InferenceEngine()
+    return _inference_engine
 
 
 # ============================================================================
@@ -178,13 +239,8 @@ def get_classifier_model():
 
 @router.post("/fusion", response_model=MultimodalFusionResponse)
 async def fuse_modalities(request: MultimodalFusionRequest):
-    """
-    Fuse features from multiple modalities.
-    
-    Supports early, late, and attention-based fusion strategies.
-    """
+    """Fuse features from multiple modalities."""
     try:
-        # Convert lists to tensors
         features = ModalityFeatures()
         modalities_used = []
         
@@ -207,14 +263,11 @@ async def fuse_modalities(request: MultimodalFusionRequest):
         if not modalities_used:
             raise HTTPException(status_code=400, detail="No features provided")
         
-        # Get fusion model
         fusion_model = get_fusion_model(request.fusion_type)
         
-        # Run fusion
         with torch.no_grad():
             fused = fusion_model(features)
         
-        # Convert back to list
         if request.fusion_type == "attention":
             fused_list = fused.numpy().tolist()
         else:
@@ -232,13 +285,8 @@ async def fuse_modalities(request: MultimodalFusionRequest):
 
 @router.post("/student-state", response_model=StudentStateClassificationResponse)
 async def classify_student_state(request: StudentStateClassificationRequest):
-    """
-    Classify student state (focused, distracted, tired, etc.) from multimodal data.
-    
-    This is the main endpoint for VisionClaw's student monitoring feature.
-    """
+    """Classify student state from multimodal data."""
     try:
-        # Build features
         features = ModalityFeatures(
             vision=torch.tensor(request.vision_features).float(),
             temporal=torch.tensor(request.temporal_features).float()
@@ -247,22 +295,18 @@ async def classify_student_state(request: StudentStateClassificationRequest):
         if request.audio_features:
             features.audio = torch.tensor(request.audio_features).float()
         
-        # Get classifier
         classifier = get_classifier_model()
         
-        # Classify
         with torch.no_grad():
             logits = classifier(features)
             probs = torch.softmax(logits, dim=-1)
         
-        # Get prediction
         pred_idx = probs.argmax(dim=-1).item()
         confidence = probs.max(dim=-1).values.item()
         
         state_names = ["focused", "distracted", "tired", "excited", "confused"]
         predicted_state = state_names[pred_idx]
         
-        # All probabilities
         all_probs = {
             state_names[i]: probs[0, i].item()
             for i in range(len(state_names))
@@ -284,19 +328,10 @@ async def classify_student_state(request: StudentStateClassificationRequest):
 
 @router.post("/causal/discover", response_model=Dict[str, Any])
 async def discover_causal_relationships(request: CausalDiscoveryRequest):
-    """
-    Discover causal relationships from observational data.
-    
-    Uses correlation-based or Granger causality methods.
-    """
+    """Discover causal relationships from observational data."""
     try:
-        # Convert data to numpy
-        data = {
-            k: np.array(v)
-            for k, v in request.data.items()
-        }
+        data = {k: np.array(v) for k, v in request.data.items()}
         
-        # Run discovery
         discovery = CausalDiscovery(method=request.method)
         
         if request.method == "correlation":
@@ -306,7 +341,6 @@ async def discover_causal_relationships(request: CausalDiscoveryRequest):
         else:
             raise HTTPException(status_code=400, detail=f"Unknown method: {request.method}")
         
-        # Format response
         edges = [
             {
                 "source": e.source,
@@ -329,44 +363,24 @@ async def discover_causal_relationships(request: CausalDiscoveryRequest):
 
 @router.post("/causal/intervention", response_model=InterventionResponse)
 async def compute_intervention_effect(request: InterventionRequest):
-    """
-    Compute the effect of an intervention using do-calculus.
-    
-    Example: "What is the expected learning score if we ensure 8 hours of sleep?"
-    """
+    """Compute the effect of an intervention using do-calculus."""
     try:
-        # Build graph from structure
         graph = CausalGraph()
         for var in request.graph_structure.get("variables", []):
             graph.add_variable(var["name"], var.get("type", "continuous"))
         
         for edge in request.graph_structure.get("edges", []):
-            graph.add_edge(
-                edge["source"],
-                edge["target"],
-                strength=edge.get("strength", 0.0)
-            )
+            graph.add_edge(edge["source"], edge["target"], strength=edge.get("strength", 0.0))
         
-        # Convert data
-        data = {
-            k: np.array(v)
-            for k, v in request.data.items()
-        }
+        data = {k: np.array(v) for k, v in request.data.items()}
         
-        # Compute intervention
         do_calc = DoCalculus(graph)
         effect = do_calc.compute_intervention(
-            data,
-            request.treatment_var,
-            request.outcome_var,
-            request.treatment_value
+            data, request.treatment_var, request.outcome_var, request.treatment_value
         )
         
         if np.isnan(effect):
-            raise HTTPException(
-                status_code=400,
-                detail="Could not compute intervention effect. Check data and graph structure."
-            )
+            raise HTTPException(status_code=400, detail="Could not compute intervention effect")
         
         return InterventionResponse(
             expected_outcome=float(effect),
@@ -380,13 +394,8 @@ async def compute_intervention_effect(request: InterventionRequest):
 
 @router.post("/causal/counterfactual", response_model=CounterfactualResponse)
 async def compute_counterfactual(request: CounterfactualRequest):
-    """
-    Compute counterfactual: "What would have happened if...?"
-    
-    Example: "What would the test score be if the child had slept 8 hours instead of 6?"
-    """
+    """Compute counterfactual: What would have happened if...?"""
     try:
-        # Build graph
         graph = CausalGraph()
         for var in request.graph_structure.get("variables", []):
             graph.add_variable(var["name"], var.get("type", "continuous"))
@@ -394,25 +403,16 @@ async def compute_counterfactual(request: CounterfactualRequest):
         for edge in request.graph_structure.get("edges", []):
             graph.add_edge(edge["source"], edge["target"])
         
-        # Convert data
-        data = {
-            k: np.array(v)
-            for k, v in request.data.items()
-        }
+        data = {k: np.array(v) for k, v in request.data.items()}
         
-        # Compute counterfactual
         cf_engine = CounterfactualEngine(graph)
         counterfactual = cf_engine.compute_counterfactual(
-            data,
-            request.observed,
-            request.intervention,
-            request.target_var
+            data, request.observed, request.intervention, request.target_var
         )
         
         observed_value = request.observed.get(request.target_var, 0)
         difference = counterfactual - observed_value
         
-        # Generate interpretation
         if difference > 0:
             interpretation = f"If the intervention had occurred, {request.target_var} would have been {difference:.2f} points higher."
         elif difference < 0:
@@ -433,13 +433,8 @@ async def compute_counterfactual(request: CounterfactualRequest):
 
 @router.post("/causal/optimize", response_model=OptimizationResponse)
 async def optimize_intervention(request: OptimizationRequest):
-    """
-    Find the optimal intervention to achieve a desired outcome.
-    
-    Example: "How many hours of sleep are needed to achieve a test score of 85?"
-    """
+    """Find the optimal intervention to achieve a desired outcome."""
     try:
-        # Build graph
         graph = CausalGraph()
         for var in request.graph_structure.get("variables", []):
             graph.add_variable(var["name"], var.get("type", "continuous"))
@@ -447,13 +442,8 @@ async def optimize_intervention(request: OptimizationRequest):
         for edge in request.graph_structure.get("edges", []):
             graph.add_edge(edge["source"], edge["target"])
         
-        # Convert data
-        data = {
-            k: np.array(v)
-            for k, v in request.data.items()
-        }
+        data = {k: np.array(v) for k, v in request.data.items()}
         
-        # Optimize
         optimizer = InterventionOptimizer(graph)
         result = optimizer.find_optimal_intervention(
             data,
@@ -464,7 +454,6 @@ async def optimize_intervention(request: OptimizationRequest):
             step=0.5
         )
         
-        # Calculate improvement
         current_mean = np.mean(data.get(request.outcome_var, [0]))
         improvement = result["actual_expected"] - current_mean if result["actual_expected"] else 0
         
@@ -473,6 +462,128 @@ async def optimize_intervention(request: OptimizationRequest):
             expected_outcome=result["actual_expected"] or 0,
             improvement=float(improvement)
         )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# API Endpoints - Event Detection & Inference Engine
+# ============================================================================
+
+@router.post("/events/detect", response_model=EventDetectionResponse)
+async def detect_events(request: EventDetectionRequest):
+    """
+    Detect complex multimodal events (frustration, breakthrough, fatigue, etc.).
+    
+    Analyzes vision, audio, and temporal patterns to identify student events.
+    """
+    try:
+        features = ModalityFeatures(
+            vision=torch.tensor(request.vision_features).float(),
+            temporal=torch.tensor(request.temporal_features).float()
+        )
+        
+        if request.audio_features:
+            features.audio = torch.tensor(request.audio_features).float()
+        
+        detector = EventDetector()
+        events = detector.detect_events(features)
+        
+        event_dicts = [e.to_dict() for e in events]
+        
+        highest_conf = None
+        if events:
+            highest = max(events, key=lambda e: e.confidence)
+            highest_conf = f"{highest.event_name} ({highest.confidence:.2f})"
+        
+        return EventDetectionResponse(
+            events=event_dicts,
+            total_events=len(events),
+            highest_confidence_event=highest_conf
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/inference/complete", response_model=InferenceResponse)
+async def complete_inference(request: InferenceRequest):
+    """
+    Run complete inference pipeline.
+    
+    Combines state classification, event detection, causal analysis,
+    and personalized recommendations.
+    """
+    try:
+        engine = get_inference_engine()
+        
+        features = ModalityFeatures(
+            vision=torch.tensor(request.vision_features).float(),
+            temporal=torch.tensor(request.temporal_features).float()
+        )
+        
+        if request.audio_features:
+            features.audio = torch.tensor(request.audio_features).float()
+        
+        result = engine.infer(
+            student_id=request.student_id,
+            features=features,
+            context=request.context
+        )
+        
+        return InferenceResponse(
+            current_state=result.current_state,
+            state_confidence=result.state_confidence,
+            events=[e.to_dict() for e in result.events],
+            causal_insights=result.causal_insights,
+            immediate_actions=result.immediate_actions,
+            long_term_suggestions=result.long_term_suggestions,
+            what_if_scenarios=result.what_if_scenarios
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/students/register")
+async def register_student(request: StudentProfileRequest):
+    """Register a student profile for personalized inference."""
+    try:
+        engine = get_inference_engine()
+        
+        profile = StudentProfile(
+            student_id=request.student_id,
+            grade_level=request.grade_level,
+            learning_style=request.learning_style,
+            average_focus_duration=request.average_focus_duration,
+            subject_proficiency=request.subject_proficiency or {}
+        )
+        
+        engine.register_student(profile)
+        
+        return {
+            "code": 0,
+            "message": "Student registered successfully",
+            "data": {"student_id": request.student_id}
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/students/{student_id}/summary")
+async def get_student_summary(student_id: str):
+    """Get learning summary for a student."""
+    try:
+        engine = get_inference_engine()
+        summary = engine.get_student_summary(student_id)
+        
+        return {
+            "code": 0,
+            "message": "success",
+            "data": summary
+        }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
